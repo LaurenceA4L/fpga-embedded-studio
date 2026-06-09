@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sopc2dts</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: monospace; font-size: 14px; margin: 0; padding: 1em 2em; background: #1e1e1e; color: #d4d4d4; }
+    h1 { margin: 0 0 0.5em; color: #9cdcfe; font-size: 1.4em; }
+    h2 { color: #9cdcfe; margin: 0 0 0.5em; font-size: 1.1em; }
+    h3 { color: #9cdcfe; margin: 0.8em 0 0.4em; font-size: 1em; }
+    section { border: 1px solid #3c3c3c; border-radius: 4px; padding: 1em; margin-bottom: 1em; }
+    input[type="text"], select { background: #2d2d2d; border: 1px solid #555; color: #d4d4d4; padding: 4px 6px; border-radius: 3px; font-family: monospace; font-size: 14px; }
+    input[type="text"] { width: 60%; }
+    button { background: #0e639c; color: #fff; border: none; padding: 5px 14px; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 14px; }
+    button:hover { background: #1177bb; }
+    button.secondary { background: #3c3c3c; color: #d4d4d4; }
+    button.secondary:hover { background: #505050; }
+    table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
+    th, td { border: 1px solid #3c3c3c; padding: 4px 8px; text-align: left; }
+    th { background: #2d2d2d; color: #9cdcfe; }
+    details summary { cursor: pointer; color: #9cdcfe; margin-bottom: 0.5em; }
+    .row { display: flex; align-items: center; gap: 0.8em; margin-bottom: 0.5em; }
+    .row label:first-child { width: 120px; color: #9cdcfe; flex-shrink: 0; }
+    textarea { width: 100%; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3c3c3c; border-radius: 3px; padding: 0.5em; font-family: monospace; font-size: 13px; resize: vertical; }
+    .output-toolbar { display: flex; align-items: center; gap: 0.8em; margin-bottom: 0.4em; }
+    .output-toolbar a { color: #9cdcfe; }
+    .copy-flash { color: #4ec9b0 !important; }
+    .err { color: #f48771; }
+    .ok  { color: #4ec9b0; }
+    .dim { color: #808080; }
+    a { color: #9cdcfe; }
+    hr { border: none; border-top: 1px solid #3c3c3c; margin: 0.8em 0; }
+    code { color: #ce9178; }
+    .htmx-indicator { display: none; color: #9cdcfe; }
+    .htmx-request .htmx-indicator { display: inline; }
+    .log-toolbar { display: flex; align-items: center; gap: 0.8em; margin-bottom: 0.4em; }
+    .log-toolbar h2 { margin: 0; }
+    #log-list { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow-y: auto; font-size: 12px; }
+    #log-list li { padding: 1px 0; border-bottom: 1px solid #2a2a2a; }
+    #log-list li.err-line { color: #f48771; }
+    #log-list li.warn-line { color: #dcdcaa; }
+  </style>
+</head>
+<body>
+
+<h1>sopc2dts</h1>
+
+<section>
+  <h2>Input</h2>
+  <form hx-post="/load" hx-target="#system-section" hx-swap="innerHTML" hx-indicator="#load-spinner">
+    <div class="row">
+      <label>sopcinfo / .qsys</label>
+      <input type="text" name="input_path" value="{{ prefill_input }}" placeholder="/path/to/system.sopcinfo">
+      <button type="submit">Load</button>
+      <span id="load-spinner" class="htmx-indicator">&#x23F3; loading&hellip;</span>
+    </div>
+  </form>
+  <form hx-post="/load-board" hx-target="#board-status" hx-swap="innerHTML" hx-indicator="#board-spinner">
+    <div class="row">
+      <label>Board file</label>
+      <input type="text" name="board_path" value="{{ boardinfo_path }}" placeholder="/path/to/board.xml  (leave blank for defaults)">
+      <button type="submit">Load</button>
+      <span id="board-spinner" class="htmx-indicator">&#x23F3; loading&hellip;</span>
+    </div>
+    <div class="row">
+      <label></label>
+      <span id="board-status" class="dim">
+        {%- if boardinfo_path %}<span class="ok">&#x2713; {{ boardinfo_path | e }}</span>
+        {%- else %}Using default board settings.{%- endif %}
+      </span>
+    </div>
+  </form>
+</section>
+
+<section>
+  <div id="system-section">
+    {% if system_html %}{{ system_html | safe }}{% else %}<p>No system loaded.</p>{% endif %}
+  </div>
+</section>
+
+<section>
+  <h2>Output</h2>
+  <div id="output-section"><p>No output yet.</p></div>
+</section>
+
+<section>
+  <div class="log-toolbar">
+    <h2>Log</h2>
+    <button type="button" class="secondary" onclick="clearLog()">Clear</button>
+    <label style="color:#808080;font-size:12px;">
+      <input type="checkbox" id="autoscroll-toggle" checked> auto-scroll
+    </label>
+  </div>
+  <ul id="log-list"></ul>
+</section>
+
+<script>
+  const logList = document.getElementById("log-list");
+  const autoscrollToggle = document.getElementById("autoscroll-toggle");
+  const MAX_LOG_LINES = 200;
+
+  const es = new EventSource("/log/stream");
+  es.onmessage = (e) => {
+    if (!e.data || e.data.trim() === "") return;
+    const li = document.createElement("li");
+    li.textContent = e.data;
+    if (e.data.includes("ERROR")) li.classList.add("err-line");
+    else if (e.data.includes("WARNING")) li.classList.add("warn-line");
+    logList.appendChild(li);
+    while (logList.children.length > MAX_LOG_LINES) logList.removeChild(logList.firstChild);
+    if (autoscrollToggle.checked) logList.scrollTop = logList.scrollHeight;
+  };
+
+  function clearLog() { logList.innerHTML = ""; }
+
+  function copyOutput() {
+    const ta = document.getElementById("output-text");
+    if (!ta) return;
+    navigator.clipboard.writeText(ta.value).then(() => {
+      const btn = document.querySelector(".output-toolbar button");
+      if (!btn) return;
+      const orig = btn.textContent;
+      btn.textContent = "✓ Copied";
+      btn.classList.add("copy-flash");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("copy-flash"); }, 1500);
+    });
+  }
+</script>
+
+</body>
+</html>

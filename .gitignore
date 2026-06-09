@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Ruff / linting
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Submodule build artifacts (don't commit these)
+submodules/sopc2dts/dist/
+submodules/sopc2dts/build/
+submodules/sopc2dts/*.egg-info/
+submodules/cheby/dist/
+submodules/cheby/build/
+
+# Web
+*.pyc
+node_modules/
+.parcel-cache/
+
+# Secrets / local config
+.env.local
+*.secret
+config.local.py
