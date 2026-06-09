@@ -32,6 +32,10 @@ from fastapi.templating import Jinja2Templates
 
 class _AppState:
     def __init__(self) -> None:
+        # Defaults pre-fill the input fields but are NOT treated as loaded
+        self.sopcinfo_default: str = "tests/fixtures/a7_system.sopcinfo"
+        self.boardinfo_default: str = "tests/fixtures/boardinfo_a7.xml"
+        # Set only when actually loaded by the user
         self.prefill_input: str = ""
         self.system = None
         self.boardinfo = None
@@ -59,7 +63,10 @@ class _GUILogHandler(logging.Handler):
 
 _gui_handler = _GUILogHandler()
 _gui_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-logging.getLogger().addHandler(_gui_handler)
+_gui_handler.setLevel(logging.WARNING)  # change to DEBUG for verbose GUI log
+_root = logging.getLogger()
+_root.setLevel(logging.DEBUG)
+_root.addHandler(_gui_handler)
 
 # ---------------------------------------------------------------------------
 # FastAPI app + templates
@@ -72,7 +79,7 @@ templates = Jinja2Templates(directory=str(_tpl_dir))
 # Wire package version so generated headers don't say "unknown"
 try:
     from importlib.metadata import version as _pkg_version, PackageNotFoundError
-    from ..model.system import AvalonSystem as _AS
+    from sopc2dts_py.model.system import AvalonSystem as _AS
     try:
         _AS.set_sopc2dts_version(_pkg_version("sopc2dts"))
     except PackageNotFoundError:
@@ -91,14 +98,13 @@ def health() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    if state.prefill_input and state.system is None:
-        _do_load(state.prefill_input)
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "prefill_input": state.prefill_input,
+            "prefill_input": state.prefill_input or state.sopcinfo_default,
             "boardinfo_path": state.boardinfo_path,
+            "boardinfo_default": state.boardinfo_default,
             "system_html": _render_system_html() if state.system else "",
         },
     )
@@ -120,10 +126,13 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
         state.boardinfo_path = ""
         return HTMLResponse('<span class="ok">Using default board settings.</span>')
     p = Path(board_path)
+    if not p.is_absolute() and not p.exists():
+        import sopc2dts_py as _pkg
+        p = Path(_pkg.__file__).parent.parent / board_path
     if not p.exists():
         return HTMLResponse(f'<span class="err">File not found: {board_path}</span>')
     try:
-        from ..parsers import load_boardinfo  # noqa: PLC0415
+        from sopc2dts_py.parsers import load_boardinfo
         state.boardinfo = load_boardinfo(str(p))
         state.boardinfo_path = board_path
         pov = state.boardinfo.pov or ""
@@ -215,20 +224,24 @@ async def log_stream() -> StreamingResponse:
 # ---------------------------------------------------------------------------
 
 def _do_load(input_path: str) -> Optional[str]:
-    from ..parsers import load_system, load_component_libs_in_dir  # noqa: PLC0415
+    from sopc2dts_py.parsers import load_system, load_component_libs_in_dir
+    from sopc2dts_py.model.boardinfo import BoardInfo
+    import sopc2dts_py as _pkg
     p = Path(input_path)
+    if not p.is_absolute() and not p.exists():
+        p = Path(_pkg.__file__).parent.parent / input_path
     if not p.exists():
         return f"File not found: {input_path}"
     try:
-        lib_dir = Path(__file__).parent.parent.parent
+        lib_dir = Path(_pkg.__file__).parent.parent
         load_component_libs_in_dir(lib_dir)
         state.system = load_system(str(p))
         state.system.recheck_components()
         state.prefill_input = input_path
-        from ..model.boardinfo import BoardInfo  # noqa: PLC0415
         state.boardinfo = BoardInfo()
         return None
     except Exception as exc:  # noqa: BLE001
+        logging.exception("Load failed: %s", input_path)
         return str(exc)
 
 
@@ -239,8 +252,8 @@ def _do_generate(
     show_clocks: bool,
     no_timestamp: bool,
 ) -> tuple[Optional[str], Optional[bytes | str]]:
-    from ..model.boardinfo import BoardInfo, SortType  # noqa: PLC0415
-    from ..generators.GeneratorFactory import GeneratorFactory  # noqa: PLC0415
+    from sopc2dts_py.model.boardinfo import BoardInfo, SortType
+    from sopc2dts_py.generators.GeneratorFactory import GeneratorFactory
     bi = state.boardinfo or BoardInfo()
     if pov:
         bi.set_pov(pov)
@@ -263,6 +276,7 @@ def _do_generate(
             return None, generator.get_text_output(bi)
         return None, generator.get_binary_output(bi)
     except Exception as exc:  # noqa: BLE001
+        logging.exception("Generate failed")
         return str(exc), None
 
 

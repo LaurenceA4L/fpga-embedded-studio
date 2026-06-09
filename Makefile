@@ -10,22 +10,36 @@
 
 PYTHON    ?= python3
 VENV      := .venv
-BIN       := $(VENV)/bin
-PIP       := $(BIN)/pip
-UVICORN   := $(BIN)/uvicorn
+
+# Windows venv uses Scripts\, Unix uses bin/
+ifeq ($(OS),Windows_NT)
+    BIN     := $(VENV)/Scripts
+    PYTHON  := python
+else
+    BIN     := $(VENV)/bin
+endif
+
+PIP         := $(BIN)/pip
+SETUP_STAMP := $(VENV)/.setup_complete
 
 SOPC2DTS  := submodules/sopc2dts
 GUI_APP   := web.gui.app:app
 GUI_HOST  := 127.0.0.1
-GUI_PORT  := 8000
+GUI_PORT  := 8765
 
-.DEFAULT_GOAL := help
+.DEFAULT_GOAL := dev
+
+# ---------------------------------------------------------------------------
+# Default
+# ---------------------------------------------------------------------------
+.PHONY: dev
+dev: update-sm setup gui  ## (default) Update submodules, install deps, launch GUI
 
 # ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 .PHONY: help
-help:
+help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
@@ -33,32 +47,32 @@ help:
 # Environment
 # ---------------------------------------------------------------------------
 .PHONY: setup
-setup: $(VENV)/pyvenv.cfg  ## Create venv and install all deps
+setup: $(SETUP_STAMP)  ## Create venv and install all deps
 
-$(VENV)/pyvenv.cfg:
+$(SETUP_STAMP):
 	$(PYTHON) -m venv $(VENV)
-	$(PIP) install --upgrade pip
+	$(BIN)/python -m pip install --upgrade pip
 	$(PIP) install -e "$(SOPC2DTS)[dev]"
 	$(PIP) install fastapi uvicorn[standard] jinja2 python-multipart
-	@echo "Setup complete. Activate with: source $(VENV)/bin/activate"
+	@touch $(SETUP_STAMP)
+	@echo "Setup complete."
 
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
 .PHONY: gui
-gui: $(VENV)/pyvenv.cfg  ## Start the web GUI at http://$(GUI_HOST):$(GUI_PORT)
-	PYTHONPATH=. $(UVICORN) $(GUI_APP) \
-	  --host $(GUI_HOST) --port $(GUI_PORT) --reload
+gui: $(SETUP_STAMP)  ## Start the web GUI (auto-opens browser)
+	PYTHONPATH=. $(BIN)/python -c "from web.gui.launcher import launch; launch()"
 
 # ---------------------------------------------------------------------------
 # sopc2dts
 # ---------------------------------------------------------------------------
 .PHONY: test
-test: $(VENV)/pyvenv.cfg  ## Run all submodule test suites
+test: $(SETUP_STAMP)  ## Run all submodule test suites
 	$(BIN)/pytest -v
 
 .PHONY: lint
-lint: $(VENV)/pyvenv.cfg  ## Lint sopc2dts with ruff
+lint: $(SETUP_STAMP)  ## Lint sopc2dts with ruff
 	$(BIN)/ruff check $(SOPC2DTS)/sopc2dts_py
 
 # ---------------------------------------------------------------------------

@@ -69,6 +69,7 @@ def launch(input_file: str = "") -> None:
         host="127.0.0.1",
         port=port,
         log_level="warning",
+        log_config=None,  # don't let uvicorn reset our logging config
     )
     server = uvicorn.Server(config)
 

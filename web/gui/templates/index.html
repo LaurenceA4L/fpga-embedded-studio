@@ -53,7 +53,10 @@
   <form hx-post="/load" hx-target="#system-section" hx-swap="innerHTML" hx-indicator="#load-spinner">
     <div class="row">
       <label>sopcinfo / .qsys</label>
-      <input type="text" name="input_path" value="{{ prefill_input }}" placeholder="/path/to/system.sopcinfo">
+      <input type="text" name="input_path" value="" placeholder="/path/to/system.sopcinfo" list="sopcinfo-suggestions">
+      <datalist id="sopcinfo-suggestions">
+        {% if prefill_input %}<option value="{{ prefill_input }}">{% endif %}
+      </datalist>
       <button type="submit">Load</button>
       <span id="load-spinner" class="htmx-indicator">&#x23F3; loading&hellip;</span>
     </div>
@@ -61,15 +64,18 @@
   <form hx-post="/load-board" hx-target="#board-status" hx-swap="innerHTML" hx-indicator="#board-spinner">
     <div class="row">
       <label>Board file</label>
-      <input type="text" name="board_path" value="{{ boardinfo_path }}" placeholder="/path/to/board.xml  (leave blank for defaults)">
+      <input type="text" name="board_path" value="{{ boardinfo_path }}" placeholder="/path/to/board.xml  (leave blank for defaults)" list="boardinfo-suggestions">
+      <datalist id="boardinfo-suggestions">
+        {% if boardinfo_default %}<option value="{{ boardinfo_default }}">{% endif %}
+      </datalist>
       <button type="submit">Load</button>
       <span id="board-spinner" class="htmx-indicator">&#x23F3; loading&hellip;</span>
     </div>
     <div class="row">
       <label></label>
       <span id="board-status" class="dim">
-        {%- if boardinfo_path %}<span class="ok">&#x2713; {{ boardinfo_path | e }}</span>
-        {%- else %}Using default board settings.{%- endif %}
+        {%- if boardinfo_path %}<span class="ok">&#x2713; Loaded: {{ boardinfo_path | e }}</span>
+        {%- else %}Not loaded.{%- endif %}
       </span>
     </div>
   </form>
