@@ -1,0 +1,3 @@
+[submodule "submodules/sopc2dts"]
+	path = submodules/sopc2dts
+	url = https://github.com/LaurenceA4L/sopc2dts
