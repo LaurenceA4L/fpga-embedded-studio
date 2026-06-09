@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fpga-embedded-studio"
+version = "0.1.0"
+description = "Unified toolchain front-end for Intel/Altera FPGA embedded development"
+requires-python = ">=3.10"
+authors = [
+    { name = "Laurence", email = "laurence@anodes4life.com" },
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "jinja2",
+    "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "submodules/sopc2dts/tests",
+]
+
+[tool.ruff]
+line-length = 100
