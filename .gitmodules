@@ -1,3 +1,6 @@
 [submodule "submodules/sopc2dts"]
 	path = submodules/sopc2dts
 	url = https://github.com/LaurenceA4L/sopc2dts
+[submodule "submodules/dts-merge"]
+	path = submodules/dts-merge
+	url = https://github.com/LaurenceA4L/dts-merge
