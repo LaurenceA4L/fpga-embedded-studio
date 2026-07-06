@@ -7,13 +7,15 @@ A minimal web-based GUI that ties together the tools needed to go from a Platfor
 ## What it does
 
 ```
-sopcinfo / .qsys  ──► sopc2dts ──►─────────────────────────────┐
-                                                                ▼
-Quartus-generated DTS  ──────────────────────────► dtmerge ► merged.dts
-                                                       ▲
-Kernel / Poky ARM DTS  ────────────────────────────────┘
+sopcinfo / .qsys  ──► sopc2dts (qualified FPGA-fabric DTS) ──┐
+                                                              ▼
+                                                    dts-merge ► merged.dts
+                                                              ▲
+HPS / Kernel / Poky ARM DTS  ────────────────────────────────┘
 
+(future) Quartus-generated DTS ──► third input to dts-merge
 (future) cheby register maps ──► register headers + annotated DTS
+(future) overlay export scoped to user-level vs admin/calibration-level registers
 ```
 
 ## Components
@@ -21,7 +23,7 @@ Kernel / Poky ARM DTS  ───────────────────
 | Submodule | Role | Status |
 |-----------|------|--------|
 | [sopc2dts](https://github.com/LaurenceA4L/sopc2dts) | Parse `.sopcinfo` / `.qsys` → DTS/DTB/headers | Active |
-| dtmerge | Interactive 3-way DTS merge | Planned |
+| [dts-merge](https://github.com/LaurenceA4L/dts-merge) | Interactive merge of sopc2dts output onto an HPS/kernel DTS | Active |
 | [cheby](https://gitlab.cern.ch/be-cem-edl/general/cheby) | Register map tooling | Planned |
 
 ## Target hardware
@@ -41,7 +43,7 @@ Each underlying tool is a standalone CLI. The studio is orchestration and a diff
 fpga-embedded-studio/
 ├── submodules/
 │   ├── sopc2dts/      # sopcinfo → DTS generator
-│   ├── dtmerge/       # DTS parser + 3-way merge (planned)
+│   ├── dts-merge/     # DTS parser + interactive merge onto HPS/kernel DTS
 │   └── cheby/         # register map tooling (planned)
 ├── web/               # FastAPI + HTMX front-end
 └── pyproject.toml

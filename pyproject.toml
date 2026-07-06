@@ -26,7 +26,12 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = [
     "submodules/sopc2dts/tests",
+    "submodules/dts-merge/tests",
+    "tests",
 ]
+# Both submodules' test packages are named plain "tests" — importlib mode
+# resolves them by file path instead of colliding on that shared module name.
+addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
 line-length = 100

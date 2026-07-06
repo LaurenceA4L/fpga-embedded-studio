@@ -43,6 +43,21 @@ class _AppState:
         self.last_output: Optional[bytes | str] = None
         self.last_output_type: str = "dts"
 
+        # --- dts-merge (HPS/kernel DTS <- sopc2dts fabric DTS) ---
+        # Default points at the real build artefact bundled as a dts-merge
+        # test fixture: reconstructed from the exact cp/sed steps
+        # meta-intel-fpga-refdes's device-tree.bb runs for MACHINE
+        # agilex7_dk_si_agf014eb (see tests/integration/test_agilex7_integration.py
+        # in the dts-merge submodule for how it's assembled/why it's real).
+        self.hps_default: str = "tests/fixtures/hps/socfpga_agilex7_socdk.dts"
+        self.hps_include_default: str = "tests/fixtures/hps/include"
+        self.hps_path: str = ""
+        self.hps_include_dirs: str = ""
+        self.hps_parsed = None            # dts_merge.parser.ParsedDTS
+        self.merge_anchor: str = ""
+        self.fpga_anchor: str = "sopc0"   # DTGenerator always labels its container "sopc0"
+        self.merge_result = None          # dts_merge.merge.MergeResult
+
 
 state = _AppState()
 
@@ -106,6 +121,7 @@ async def index(request: Request) -> HTMLResponse:
             "boardinfo_path": state.boardinfo_path,
             "boardinfo_default": state.boardinfo_default,
             "system_html": _render_system_html() if state.system else "",
+            "merge_html": _render_merge_html(),
         },
     )
 
@@ -115,7 +131,7 @@ async def load(input_path: str = Form(...)) -> HTMLResponse:
     err = _do_load(input_path.strip())
     if err:
         return HTMLResponse(f'<p class="err">Error: {err}</p>')
-    return HTMLResponse(_render_system_html())
+    return HTMLResponse(_render_system_html() + _render_merge_section_oob())
 
 
 @app.post("/load-board", response_class=HTMLResponse)
@@ -124,7 +140,8 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
     if not board_path:
         state.boardinfo = None
         state.boardinfo_path = ""
-        return HTMLResponse('<span class="ok">Using default board settings.</span>')
+        state.merge_result = None  # POV/boardinfo changed; any prior merge is stale
+        return HTMLResponse('<span class="ok">Using default board settings.</span>' + _render_merge_section_oob())
     p = Path(board_path)
     if not p.is_absolute() and not p.exists():
         import sopc2dts_py as _pkg
@@ -135,6 +152,7 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
         from sopc2dts_py.parsers import load_boardinfo
         state.boardinfo = load_boardinfo(str(p))
         state.boardinfo_path = board_path
+        state.merge_result = None  # POV/boardinfo changed; any prior merge is stale
         pov = state.boardinfo.pov or ""
         oob = (
             '<input id="pov-input" name="pov" type="text" '
@@ -142,7 +160,9 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
             + 'hx-swap-oob="true">'
         )
         label = f" &mdash; POV: <code>{pov}</code>" if pov else ""
-        return HTMLResponse(f'<span class="ok">&#x2713; Loaded: {p.name}{label}</span>{oob}')
+        return HTMLResponse(
+            f'<span class="ok">&#x2713; Loaded: {p.name}{label}</span>{oob}{_render_merge_section_oob()}'
+        )
     except Exception as exc:  # noqa: BLE001
         return HTMLResponse(f'<span class="err">Error: {exc}</span>')
 
@@ -202,6 +222,77 @@ def download() -> Response:
     )
 
 
+@app.post("/merge/load-hps", response_class=HTMLResponse)
+async def merge_load_hps(
+    hps_path: str = Form(...),
+    include_dirs: str = Form(""),
+) -> HTMLResponse:
+    err = _do_load_hps(hps_path.strip(), include_dirs.strip())
+    if err:
+        return HTMLResponse(f'<p class="err">Error: {err}</p>' + _render_merge_html())
+    return HTMLResponse(_render_merge_html())
+
+
+@app.post("/merge", response_class=HTMLResponse)
+async def do_merge(
+    anchor_label: str = Form(""),
+    fpga_anchor_label: str = Form("sopc0"),
+) -> HTMLResponse:
+    if state.system is None:
+        return HTMLResponse('<p class="err">Load a sopcinfo/.qsys system first.</p>' + _render_merge_html())
+    if state.hps_parsed is None:
+        return HTMLResponse('<p class="err">Load an HPS/kernel DTS file first.</p>' + _render_merge_html())
+
+    from dts_merge.merge import MergeError, merge_trees
+    from sopc2dts_py.generators.GeneratorFactory import GeneratorFactory, GeneratorType
+    from sopc2dts_py.model.boardinfo import BoardInfo
+
+    state.merge_anchor = anchor_label.strip()
+    state.fpga_anchor = fpga_anchor_label.strip()
+
+    bi = state.boardinfo or BoardInfo()
+    fpga_generator = GeneratorFactory.create_generator_for(state.system, GeneratorType.DTS)
+    fpga_root = fpga_generator.get_dt_output(bi)
+
+    try:
+        state.merge_result = merge_trees(
+            state.hps_parsed.root, fpga_root,
+            base_anchor_label=state.merge_anchor or None,
+            fpga_anchor_label=state.fpga_anchor or None,
+        )
+    except MergeError as exc:
+        state.merge_result = None
+        return HTMLResponse(f'<p class="err">Error: {exc}</p>' + _render_merge_html())
+
+    return HTMLResponse(_render_merge_html())
+
+
+@app.post("/merge/resolve", response_class=HTMLResponse)
+async def merge_resolve(index: int = Form(...), choice: str = Form(...)) -> HTMLResponse:
+    from dts_merge.merge import Resolution
+
+    if state.merge_result is None:
+        return HTMLResponse('<p class="err">No merge in progress.</p>' + _render_merge_html())
+    try:
+        state.merge_result.resolve(index, Resolution[choice.upper()])
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(f'<p class="err">Error: {exc}</p>' + _render_merge_html())
+    return HTMLResponse(_render_merge_html())
+
+
+@app.get("/merge/download")
+def merge_download() -> Response:
+    result = state.merge_result
+    if result is None or result.unresolved:
+        return Response("No fully-resolved merge available.", status_code=404)
+    content = ("/dts-v1/;\n" + result.merged_root.to_string(0)).encode("utf-8")
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": 'attachment; filename="merged.dts"'},
+    )
+
+
 @app.get("/log/stream")
 async def log_stream() -> StreamingResponse:
     async def _events():
@@ -239,9 +330,34 @@ def _do_load(input_path: str) -> Optional[str]:
         state.system.recheck_components()
         state.prefill_input = input_path
         state.boardinfo = BoardInfo()
+        state.merge_result = None  # any prior merge paired a now-replaced fpga tree
         return None
     except Exception as exc:  # noqa: BLE001
         logging.exception("Load failed: %s", input_path)
+        return str(exc)
+
+
+def _do_load_hps(input_path: str, include_dirs_raw: str) -> Optional[str]:
+    from dts_merge.parser import DTSParseError, preprocess_and_parse
+    import dts_merge as _dm
+    pkg_root = Path(_dm.__file__).parent.parent
+
+    def _resolve(raw: str) -> Path:
+        rp = Path(raw)
+        return rp if rp.is_absolute() or rp.exists() else pkg_root / raw
+
+    p = _resolve(input_path)
+    if not p.exists():
+        return f"File not found: {input_path}"
+    include_dirs = [_resolve(d.strip()) for d in include_dirs_raw.split(",") if d.strip()]
+    try:
+        state.hps_parsed = preprocess_and_parse(p, include_dirs)
+        state.hps_path = input_path
+        state.hps_include_dirs = include_dirs_raw
+        state.merge_result = None
+        return None
+    except DTSParseError as exc:
+        logging.exception("HPS DTS load failed: %s", input_path)
         return str(exc)
 
 
@@ -325,6 +441,120 @@ def _render_system_html() -> str:
         '<span id="spinner" class="htmx-indicator"> &#x23F3; generating&hellip;</span>'
         '</div></form>'
     )
+
+
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _render_merge_section_oob() -> str:
+    """
+    Out-of-band swap for #merge-section, piggy-backed on responses (like
+    /load) that change whether a system is loaded but don't target that
+    section themselves — mirrors the existing pov-input OOB swap in
+    /load-board.
+    """
+    return f'<div id="merge-section" hx-swap-oob="true">{_render_merge_html()}</div>'
+
+
+def _render_merge_html() -> str:
+    if state.system is None:
+        return "<p>Load a sopcinfo/.qsys system above first.</p>"
+
+    hps_status = (
+        f'<span class="ok">&#x2713; Loaded: {_esc(state.hps_path)}</span>' if state.hps_parsed
+        else '<span class="dim">Not loaded.</span>'
+    )
+    html = (
+        '<form hx-post="/merge/load-hps" hx-target="#merge-section" hx-swap="innerHTML" hx-indicator="#hps-spinner">'
+        '<div class="row"><label>HPS/kernel DTS</label>'
+        f'<input type="text" name="hps_path" value="{_esc(state.hps_path)}" '
+        'placeholder="/path/to/socfpga_..._socdk.dts" list="hps-dts-suggestions">'
+        f'<datalist id="hps-dts-suggestions"><option value="{_esc(state.hps_default)}"></datalist>'
+        '<button type="submit">Load</button>'
+        '<span id="hps-spinner" class="htmx-indicator">&#x23F3; loading&hellip;</span>'
+        '</div>'
+        '<div class="row"><label>Include dirs</label>'
+        f'<input type="text" name="include_dirs" value="{_esc(state.hps_include_dirs)}" '
+        'placeholder="comma-separated -I dirs for cpp (dt-bindings headers, ...)" '
+        'list="hps-include-suggestions">'
+        f'<datalist id="hps-include-suggestions"><option value="{_esc(state.hps_include_default)}"></datalist>'
+        '</div>'
+        f'<div class="row"><label></label>{hps_status}</div>'
+        '</form>'
+        '<hr>'
+        '<form hx-post="/merge" hx-target="#merge-section" hx-swap="innerHTML" hx-indicator="#merge-spinner">'
+        '<div class="row"><label>Base anchor</label>'
+        f'<input type="text" name="anchor_label" value="{_esc(state.merge_anchor)}" '
+        'placeholder="label in the HPS tree, e.g. soc0 (blank = HPS root)"></div>'
+        '<div class="row"><label>FPGA anchor</label>'
+        f'<input type="text" name="fpga_anchor_label" value="{_esc(state.fpga_anchor)}" '
+        'placeholder="label inside the fpga tree, e.g. sopc0"></div>'
+        '<div class="row"><label></label>'
+        '<button type="submit">Compute merge</button>'
+        '<span id="merge-spinner" class="htmx-indicator">&#x23F3; merging&hellip;</span>'
+        '</div></form>'
+        f'{_render_conflicts_html()}'
+    )
+    return html
+
+
+def _conflict_path_display(c) -> str:
+    from dts_merge.merge import ConflictKind
+    if c.kind == ConflictKind.DUPLICATE_LABEL and c.base_path and c.fpga_path:
+        return f"{c.label}: {c.base_path} (HPS) ↔ {c.fpga_path} (FPGA)"
+    return c.path
+
+
+def _render_conflicts_html() -> str:
+    result = state.merge_result
+    if result is None:
+        return ""
+    if not result.conflicts:
+        return '<hr><p class="ok">&#x2713; No conflicts &mdash; merge is clean.</p>' + _render_merge_download_link()
+
+    from dts_merge.merge import ConflictKind
+
+    rows = []
+    for i, c in enumerate(result.conflicts):
+        path = _esc(_conflict_path_display(c))
+        kind = c.kind.name.replace("_", " ").title()
+        if c.resolved:
+            rows.append(
+                f'<tr><td>{kind}</td><td><code>{path}</code></td>'
+                f'<td class="ok">&#x2713; kept {c.resolution.name.lower()}</td><td></td></tr>'
+            )
+            continue
+        both_btn = (
+            f'<button name="choice" value="both" type="submit">Keep both</button>'
+            if c.kind in (ConflictKind.DUPLICATE_PATH, ConflictKind.DUPLICATE_LABEL) else ""
+        )
+        rows.append(
+            f'<tr><td>{kind}</td><td><code>{path}</code></td><td class="err">unresolved</td>'
+            '<td>'
+            f'<form hx-post="/merge/resolve" hx-target="#merge-section" hx-swap="innerHTML" style="display:inline">'
+            f'<input type="hidden" name="index" value="{i}">'
+            '<button name="choice" value="base" type="submit">Keep HPS</button> '
+            '<button name="choice" value="fpga" type="submit">Keep FPGA</button> '
+            f'{both_btn}'
+            '</form></td></tr>'
+        )
+    table = (
+        '<hr><h3>Conflicts</h3>'
+        '<table><thead><tr><th>Kind</th><th>Path</th><th>Status</th><th>Resolve</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+    )
+    unresolved_n = len(result.unresolved)
+    footer = (
+        f'<p>{unresolved_n} of {len(result.conflicts)} conflict(s) unresolved.</p>'
+        if unresolved_n else
+        '<p class="ok">All conflicts resolved.</p>' + _render_merge_download_link()
+    )
+    return table + footer
+
+
+def _render_merge_download_link() -> str:
+    return '<p><a href="/merge/download" download="merged.dts">&#x2B07; Download merged.dts</a></p>'
 
 
 _EXT_MAP: dict[str, str] = {
