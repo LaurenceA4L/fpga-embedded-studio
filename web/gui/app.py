@@ -26,6 +26,13 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from . import inputs_cache
+from .inputs_cache import TrackedInput
+
+# Local working-copy cache: every Load action copies its source here instead
+# of parsing external trees in place — see web/gui/inputs_cache.py.
+CACHE_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+
 # ---------------------------------------------------------------------------
 # Application state
 # ---------------------------------------------------------------------------
@@ -57,6 +64,10 @@ class _AppState:
         self.merge_anchor: str = ""
         self.fpga_anchor: str = "sopc0"   # DTGenerator always labels its container "sopc0"
         self.merge_result = None          # dts_merge.merge.MergeResult
+
+        # --- tracked-input cache (web/gui/inputs_cache.py) ---
+        self.tracked_inputs: dict[str, TrackedInput] = {}    # "sopcinfo" | "boardinfo" | "hps"
+        self.tracked_includes: list[TrackedInput] = []       # one per cpp -I dir
 
 
 state = _AppState()
@@ -122,6 +133,7 @@ async def index(request: Request) -> HTMLResponse:
             "boardinfo_default": state.boardinfo_default,
             "system_html": _render_system_html() if state.system else "",
             "merge_html": _render_merge_html(),
+            "inputs_html": _render_inputs_html(),
         },
     )
 
@@ -131,7 +143,7 @@ async def load(input_path: str = Form(...)) -> HTMLResponse:
     err = _do_load(input_path.strip())
     if err:
         return HTMLResponse(f'<p class="err">Error: {err}</p>')
-    return HTMLResponse(_render_system_html() + _render_merge_section_oob())
+    return HTMLResponse(_render_system_html() + _render_merge_section_oob() + _render_inputs_section_oob())
 
 
 @app.post("/load-board", response_class=HTMLResponse)
@@ -140,8 +152,12 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
     if not board_path:
         state.boardinfo = None
         state.boardinfo_path = ""
+        state.tracked_inputs.pop("boardinfo", None)
         state.merge_result = None  # POV/boardinfo changed; any prior merge is stale
-        return HTMLResponse('<span class="ok">Using default board settings.</span>' + _render_merge_section_oob())
+        return HTMLResponse(
+            '<span class="ok">Using default board settings.</span>'
+            + _render_merge_section_oob() + _render_inputs_section_oob()
+        )
     p = Path(board_path)
     if not p.is_absolute() and not p.exists():
         import sopc2dts_py as _pkg
@@ -150,7 +166,9 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
         return HTMLResponse(f'<span class="err">File not found: {board_path}</span>')
     try:
         from sopc2dts_py.parsers import load_boardinfo
-        state.boardinfo = load_boardinfo(str(p))
+        entry = inputs_cache.register("boardinfo", "boardinfo", p, CACHE_ROOT)
+        state.boardinfo = load_boardinfo(str(entry.cache_path))
+        state.tracked_inputs["boardinfo"] = entry
         state.boardinfo_path = board_path
         state.merge_result = None  # POV/boardinfo changed; any prior merge is stale
         pov = state.boardinfo.pov or ""
@@ -161,7 +179,8 @@ async def load_board(board_path: str = Form(...)) -> HTMLResponse:
         )
         label = f" &mdash; POV: <code>{pov}</code>" if pov else ""
         return HTMLResponse(
-            f'<span class="ok">&#x2713; Loaded: {p.name}{label}</span>{oob}{_render_merge_section_oob()}'
+            f'<span class="ok">&#x2713; Loaded: {p.name}{label}</span>{oob}'
+            f'{_render_merge_section_oob()}{_render_inputs_section_oob()}'
         )
     except Exception as exc:  # noqa: BLE001
         return HTMLResponse(f'<span class="err">Error: {exc}</span>')
@@ -229,8 +248,8 @@ async def merge_load_hps(
 ) -> HTMLResponse:
     err = _do_load_hps(hps_path.strip(), include_dirs.strip())
     if err:
-        return HTMLResponse(f'<p class="err">Error: {err}</p>' + _render_merge_html())
-    return HTMLResponse(_render_merge_html())
+        return HTMLResponse(f'<p class="err">Error: {err}</p>' + _render_merge_html() + _render_inputs_section_oob())
+    return HTMLResponse(_render_merge_html() + _render_inputs_section_oob())
 
 
 @app.post("/merge", response_class=HTMLResponse)
@@ -293,6 +312,42 @@ def merge_download() -> Response:
     )
 
 
+@app.get("/inputs/status", response_class=HTMLResponse)
+async def inputs_status() -> HTMLResponse:
+    """
+    Polled by the "Tracked Inputs" panel (htmx `hx-trigger="load, every 5s"`).
+    Recomputes each entry's source digest and compares it to the snapshot
+    taken at last copy/refresh — never touches the cache itself.
+    """
+    for key, entry in state.tracked_inputs.items():
+        state.tracked_inputs[key] = inputs_cache.check(entry)
+    state.tracked_includes = [inputs_cache.check(e) for e in state.tracked_includes]
+    return HTMLResponse(_render_inputs_html())
+
+
+@app.post("/inputs/refresh", response_class=HTMLResponse)
+async def inputs_refresh(slot: str = Form(...)) -> HTMLResponse:
+    """Explicitly re-copy one tracked input's source into its cache slot —
+    the only thing (besides the initial Load) that ever writes to data/."""
+    entry, dict_key, list_idx = _find_tracked(slot)
+    if entry is None:
+        return HTMLResponse(f'<p class="err">Unknown slot: {slot}</p>' + _render_inputs_html())
+
+    try:
+        refreshed = inputs_cache.refresh(entry, CACHE_ROOT, with_siblings=(entry.kind == "hps"))
+    except inputs_cache.TrackedInputError as exc:
+        return HTMLResponse(f'<p class="err">Error: {exc}</p>' + _render_inputs_html())
+
+    if dict_key is not None:
+        state.tracked_inputs[dict_key] = refreshed
+    else:
+        state.tracked_includes[list_idx] = refreshed
+
+    err = _reparse_after_refresh(entry.kind)
+    prefix = f'<p class="err">Error: {err}</p>' if err else ""
+    return HTMLResponse(prefix + _render_inputs_html())
+
+
 @app.get("/log/stream")
 async def log_stream() -> StreamingResponse:
     async def _events():
@@ -324,10 +379,15 @@ def _do_load(input_path: str) -> Optional[str]:
     if not p.exists():
         return f"File not found: {input_path}"
     try:
+        entry = inputs_cache.register("sopcinfo", "sopcinfo", p, CACHE_ROOT)
+    except inputs_cache.TrackedInputError as exc:
+        return str(exc)
+    try:
         lib_dir = Path(_pkg.__file__).parent.parent
         load_component_libs_in_dir(lib_dir)
-        state.system = load_system(str(p))
+        state.system = load_system(str(entry.cache_path))
         state.system.recheck_components()
+        state.tracked_inputs["sopcinfo"] = entry
         state.prefill_input = input_path
         state.boardinfo = BoardInfo()
         state.merge_result = None  # any prior merge paired a now-replaced fpga tree
@@ -349,9 +409,23 @@ def _do_load_hps(input_path: str, include_dirs_raw: str) -> Optional[str]:
     p = _resolve(input_path)
     if not p.exists():
         return f"File not found: {input_path}"
-    include_dirs = [_resolve(d.strip()) for d in include_dirs_raw.split(",") if d.strip()]
+    include_dir_sources = [_resolve(d.strip()) for d in include_dirs_raw.split(",") if d.strip()]
+
     try:
-        state.hps_parsed = preprocess_and_parse(p, include_dirs)
+        hps_entry = inputs_cache.register("hps", "hps", p, CACHE_ROOT, with_siblings=True)
+        include_entries = [
+            inputs_cache.register("hps_include", f"hps_include_{i}_{d.name}", d, CACHE_ROOT)
+            for i, d in enumerate(include_dir_sources)
+        ]
+    except inputs_cache.TrackedInputError as exc:
+        return str(exc)
+
+    try:
+        state.hps_parsed = preprocess_and_parse(
+            hps_entry.cache_path, [e.cache_path for e in include_entries]
+        )
+        state.tracked_inputs["hps"] = hps_entry
+        state.tracked_includes = include_entries
         state.hps_path = input_path
         state.hps_include_dirs = include_dirs_raw
         state.merge_result = None
@@ -447,6 +521,91 @@ def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _find_tracked(slot: str) -> tuple[Optional[TrackedInput], Optional[str], Optional[int]]:
+    """Locate a tracked entry by its cache slot name. Returns
+    ``(entry, dict_key, list_index)`` — exactly one of the last two is set,
+    matching whichever of state.tracked_inputs/state.tracked_includes it
+    lives in, so the caller can write the refreshed entry back in place."""
+    for key, e in state.tracked_inputs.items():
+        if e.slot == slot:
+            return e, key, None
+    for i, e in enumerate(state.tracked_includes):
+        if e.slot == slot:
+            return e, None, i
+    return None, None, None
+
+
+def _reparse_after_refresh(kind: str) -> Optional[str]:
+    """Re-run the parse step for whatever a refreshed cache slot feeds into,
+    so state.system/state.hps_parsed reflect the newly-copied content.
+    Returns an error string on failure, else None."""
+    try:
+        if kind == "sopcinfo":
+            from sopc2dts_py.parsers import load_system
+            entry = state.tracked_inputs["sopcinfo"]
+            state.system = load_system(str(entry.cache_path))
+            state.system.recheck_components()
+            state.merge_result = None
+        elif kind == "boardinfo":
+            from sopc2dts_py.parsers import load_boardinfo
+            entry = state.tracked_inputs["boardinfo"]
+            state.boardinfo = load_boardinfo(str(entry.cache_path))
+            state.merge_result = None
+        elif kind in ("hps", "hps_include"):
+            from dts_merge.parser import preprocess_and_parse
+            hps_entry = state.tracked_inputs.get("hps")
+            if hps_entry is not None:
+                state.hps_parsed = preprocess_and_parse(
+                    hps_entry.cache_path, [e.cache_path for e in state.tracked_includes]
+                )
+                state.merge_result = None
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("Re-parse after refresh failed (kind=%s)", kind)
+        return str(exc)
+
+
+_KIND_LABELS = {
+    "sopcinfo": "sopcinfo / .qsys",
+    "boardinfo": "Board file",
+    "hps": "HPS/kernel DTS",
+    "hps_include": "Include dir",
+}
+
+
+def _status_badge(entry: TrackedInput) -> str:
+    ts = entry.checked_at.strftime("%H:%M:%S")
+    if entry.status == "changed":
+        return f'<span class="err">&#x26A0; changed (checked {ts})</span>'
+    if entry.status == "missing":
+        return f'<span class="err">&#x2717; source missing (checked {ts})</span>'
+    return f'<span class="ok">&#x2713; in sync (checked {ts})</span>'
+
+
+def _render_inputs_html() -> str:
+    entries: list[TrackedInput] = list(state.tracked_inputs.values()) + state.tracked_includes
+    if not entries:
+        return "<p>No inputs loaded yet.</p>"
+    rows = "".join(
+        "<tr>"
+        f"<td>{_esc(_KIND_LABELS.get(e.kind, e.kind))}</td>"
+        f"<td><code>{_esc(str(e.source))}</code></td>"
+        f"<td><code>{_esc(str(e.cache_path))}</code></td>"
+        f"<td>{_status_badge(e)}</td>"
+        "<td>"
+        '<form hx-post="/inputs/refresh" hx-target="#inputs-section" hx-swap="innerHTML" style="display:inline">'
+        f'<input type="hidden" name="slot" value="{_esc(e.slot)}">'
+        '<button type="submit">Refresh</button>'
+        "</form></td></tr>"
+        for e in entries
+    )
+    return (
+        '<table><thead><tr><th>Kind</th><th>Source</th><th>Cached copy</th>'
+        '<th>Status</th><th></th></tr></thead>'
+        f'<tbody>{rows}</tbody></table>'
+    )
+
+
 def _render_merge_section_oob() -> str:
     """
     Out-of-band swap for #merge-section, piggy-backed on responses (like
@@ -455,6 +614,12 @@ def _render_merge_section_oob() -> str:
     /load-board.
     """
     return f'<div id="merge-section" hx-swap-oob="true">{_render_merge_html()}</div>'
+
+
+def _render_inputs_section_oob() -> str:
+    """Out-of-band swap for #inputs-section so a freshly-registered/refreshed
+    cache entry shows up immediately, without waiting for the next 5s poll."""
+    return f'<div id="inputs-section" hx-swap-oob="true">{_render_inputs_html()}</div>'
 
 
 def _render_merge_html() -> str:

@@ -32,6 +32,9 @@ HPS_INCLUDE = REPO_ROOT / "submodules/dts-merge/tests/fixtures/hps/include"
 @pytest.fixture(autouse=True)
 def _reset_state():
     """The GUI's ``state`` is a module-level singleton — reset it per test."""
+    import shutil
+    from web.gui.app import CACHE_ROOT
+
     state.system = None
     state.boardinfo = None
     state.boardinfo_path = ""
@@ -41,7 +44,11 @@ def _reset_state():
     state.merge_anchor = ""
     state.fpga_anchor = "sopc0"
     state.merge_result = None
+    state.tracked_inputs = {}
+    state.tracked_includes = []
+    shutil.rmtree(CACHE_ROOT, ignore_errors=True)
     yield
+    shutil.rmtree(CACHE_ROOT, ignore_errors=True)
 
 
 @pytest.fixture

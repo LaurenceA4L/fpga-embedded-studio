@@ -49,6 +49,10 @@ submodules/cheby/build/
 node_modules/
 .parcel-cache/
 
+# GUI tracked-input working-copy cache (web/gui/inputs_cache.py) — copies of
+# whatever external trees were loaded, never committed.
+/data/
+
 # Secrets / local config
 .env.local
 *.secret

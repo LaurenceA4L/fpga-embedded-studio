@@ -82,6 +82,13 @@
 </section>
 
 <section>
+  <h2>Tracked Inputs</h2>
+  <div id="inputs-section" hx-get="/inputs/status" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    {{ inputs_html | safe }}
+  </div>
+</section>
+
+<section>
   <div id="system-section">
     {% if system_html %}{{ system_html | safe }}{% else %}<p>No system loaded.</p>{% endif %}
   </div>
